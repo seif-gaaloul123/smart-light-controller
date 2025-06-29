@@ -1,0 +1,316 @@
+import 'package:flutter/material.dart';
+import 'package:mqtt_client/mqtt_client.dart';
+import 'package:mqtt_client/mqtt_server_client.dart';
+
+// Point d'entrée de l'application
+void main() {
+  runApp(MyApp());
+}
+
+// Notifie l'application du thème choisi (système, clair, sombre)
+final ValueNotifier<ThemeMode> themeNotifier = ValueNotifier(ThemeMode.system);
+
+// Widget principal de l'application
+class MyApp extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<ThemeMode>(
+      valueListenable: themeNotifier,
+      builder: (context, mode, _) {
+        return MaterialApp(
+          title: 'Smart House: Smart Lights',
+          themeMode: mode, // Applique le thème en fonction du choix utilisateur
+          theme: ThemeData(
+            brightness: Brightness.light,
+            primarySwatch: Colors.blue,
+            cardColor: Colors.white,
+          ),
+          darkTheme: ThemeData(
+            brightness: Brightness.dark,
+            primarySwatch: Colors.blue,
+            cardColor: Colors.grey[900],
+            scaffoldBackgroundColor: Colors.black,
+            switchTheme: SwitchThemeData(
+              thumbColor: MaterialStateProperty.all(Colors.amber),
+              trackColor: MaterialStateProperty.all(Colors.amberAccent),
+            ),
+          ),
+          home: const LedControlPage(), // Page principale
+        );
+      },
+    );
+  }
+}
+
+// Page principale pour le contrôle des LEDs
+class LedControlPage extends StatefulWidget {
+  const LedControlPage({super.key});
+
+  @override
+  State<LedControlPage> createState() => _LedControlPageState();
+}
+
+class _LedControlPageState extends State<LedControlPage> {
+  late MqttServerClient client;
+  String broker = 'broker.hivemq.com'; // Adresse du broker MQTT
+  int port = 1883; // Port MQTT
+
+  final topics = ['esp32/led1', 'esp32/led2', 'esp32/led3']; // Sujets MQTT
+  final List<String> labels = ['Living Room', 'Bedroom', 'Kitchen']; // Étiquettes pour les pièces
+  List<bool> ledStates = [false, false, false]; // États des LEDs
+  bool _isConnected = false; // État de la connexion MQTT
+
+  final TextEditingController _brokerController = TextEditingController();
+  final TextEditingController _portController = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _brokerController.text = broker;
+    _portController.text = port.toString();
+    _initClient(); // Initialiser le client MQTT
+    _connectMQTT(); // Se connecter au broker MQTT
+  }
+
+  // Initialisation du client MQTT
+  void _initClient() {
+    client = MqttServerClient(broker, '');
+    client.port = port;
+    client.keepAlivePeriod = 20; // Durée de vie de la connexion
+    client.logging(on: false); // Désactiver les logs
+    client.onDisconnected = _onDisconnected;
+    client.onConnected = _onConnected;
+
+    // Message de connexion
+    client.connectionMessage = MqttConnectMessage()
+        .withClientIdentifier('flutter_client_${DateTime.now().millisecondsSinceEpoch}')
+        .startClean();
+  }
+
+  // Connexion au broker MQTT
+  Future<void> _connectMQTT() async {
+    try {
+      await client.connect();
+      setState(() {
+        _isConnected = true;
+      });
+
+      // S'abonner à tous les sujets définis
+      for (var topic in topics) {
+        client.subscribe(topic, MqttQos.atLeastOnce);
+      }
+
+      // Écoute des messages reçus
+      client.updates!.listen((event) {
+        final topic = event[0].topic;
+        final msg = MqttPublishPayload.bytesToStringAsString(
+          (event[0].payload as MqttPublishMessage).payload.message,
+        );
+
+        setState(() {
+          int index = topics.indexOf(topic);
+          if (index != -1) {
+            ledStates[index] = (msg == 'ON'); // Met à jour l'état de la LED
+          }
+        });
+      });
+    } catch (e) {
+      print('MQTT connection failed: $e');
+      client.disconnect();
+      setState(() {
+        _isConnected = false;
+      });
+    }
+  }
+
+  // Callback : déconnexion du broker
+  void _onDisconnected() {
+    print('Disconnected');
+    setState(() {
+      _isConnected = false;
+    });
+  }
+
+  // Callback : connexion réussie
+  void _onConnected() {
+    print('Connected');
+  }
+
+  // Allumer / Éteindre une LED (via MQTT)
+  void _toggleLed(int index) {
+    if (!_isConnected) return;
+
+    final builder = MqttClientPayloadBuilder();
+    final newState = !ledStates[index];
+    builder.addString(newState ? 'ON' : 'OFF');
+
+    client.publishMessage(topics[index], MqttQos.atLeastOnce, builder.payload!);
+
+    setState(() {
+      ledStates[index] = newState;
+    });
+  }
+
+  // Boîte de dialogue pour modifier les paramètres du broker MQTT
+  Future<void> _showBrokerSettingsDialog() async {
+    final formKey = GlobalKey<FormState>();
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('MQTT Broker Settings'),
+          content: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextFormField(
+                  controller: _brokerController,
+                  decoration: const InputDecoration(labelText: 'Adresse du broker'),
+                  validator: (value) =>
+                  value == null || value.isEmpty ? 'Entrez l\'adresse du broker' : null,
+                ),
+                TextFormField(
+                  controller: _portController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(labelText: 'Port'),
+                  validator: (value) {
+                    if (value == null || value.isEmpty) return 'Entrez un port';
+                    if (int.tryParse(value) == null) return 'Numéro invalide';
+                    return null;
+                  },
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              child: const Text('Annuler'),
+              onPressed: () => Navigator.pop(context, false),
+            ),
+            TextButton(
+              child: const Text('Enregistrer'),
+              onPressed: () {
+                if (formKey.currentState!.validate()) {
+                  Navigator.pop(context, true);
+                }
+              },
+            ),
+          ],
+        );
+      },
+    );
+
+    // Mise à jour des paramètres si l'utilisateur a validé
+    if (result == true) {
+      final newBroker = _brokerController.text.trim();
+      final newPort = int.tryParse(_portController.text.trim()) ?? 1883;
+
+      if (newBroker != broker || newPort != port) {
+        setState(() {
+          broker = newBroker;
+          port = newPort;
+          _isConnected = false;
+        });
+
+        client.disconnect();
+        _initClient();
+        await _connectMQTT();
+      }
+    }
+  }
+
+  // Affiche l'état de la connexion (connecté / déconnecté)
+  Widget _buildConnectionStatus() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      color: _isConnected ? Colors.green : Colors.red,
+      child: Text(
+        _isConnected ? 'MQTT Connecté' : 'MQTT Déconnecté',
+        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        textAlign: TextAlign.center,
+      ),
+    );
+  }
+
+  // Widget pour chaque bouton de contrôle de LED
+  Widget _buildLedButton(int index) {
+    IconData icon;
+    switch (index) {
+      case 0:
+        icon = Icons.weekend; // Salon
+        break;
+      case 1:
+        icon = Icons.bed; // Chambre
+        break;
+      case 2:
+        icon = Icons.kitchen; // Cuisine
+        break;
+      default:
+        icon = Icons.lightbulb_outline;
+    }
+
+    return Card(
+      margin: const EdgeInsets.all(10),
+      child: ListTile(
+        leading: Icon(
+          icon,
+          color: ledStates[index] ? Colors.amber : Colors.grey,
+          size: 40,
+        ),
+        title: Text(labels[index], style: const TextStyle(fontSize: 18)),
+        trailing: Switch(
+          value: ledStates[index],
+          onChanged: (_) => _toggleLed(index), // Action de commutation
+        ),
+      ),
+    );
+  }
+
+  // Libère les ressources
+  @override
+  void dispose() {
+    client.disconnect();
+    _brokerController.dispose();
+    _portController.dispose();
+    super.dispose();
+  }
+
+  // Interface utilisateur
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Smart House: Smart Lights'),
+        actions: [
+          // Bouton pour changer le thème clair/sombre
+          IconButton(
+            icon: Icon(
+              themeNotifier.value == ThemeMode.dark ? Icons.light_mode : Icons.dark_mode,
+            ),
+            onPressed: () {
+              themeNotifier.value = themeNotifier.value == ThemeMode.dark
+                  ? ThemeMode.light
+                  : ThemeMode.dark;
+            },
+            tooltip: 'Changer de mode clair/sombre',
+          ),
+          // Accès aux paramètres MQTT
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: 'Paramètres du broker MQTT',
+            onPressed: _showBrokerSettingsDialog,
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          _buildConnectionStatus(),
+          ...List.generate(labels.length, _buildLedButton), // Affiche les boutons de LEDs
+        ],
+      ),
+    );
+  }
+}
