@@ -1,0 +1,142 @@
+#include <WiFi.h>                // Bibliothèque pour la connexion WiFi
+#include <PubSubClient.h>       // Bibliothèque pour utiliser MQTT
+
+// Définition des broches des LED et des boutons
+#define LED1 15
+#define LED2 2
+#define LED3 4
+#define BTN1 18
+#define BTN2 19
+#define BTN3 21
+
+// Définir si des relais sont utilisés (relai actif à l’état bas)
+const bool useRelay = false;
+
+const char* ssid = "HAISSN";                 // Nom du réseau WiFi
+const char* password = "123456789";          // Mot de passe du réseau WiFi
+const char* mqtt_server = "broker.hivemq.com"; // Adresse du serveur MQTT
+
+WiFiClient espClient;              // Objet WiFi pour ESP32
+PubSubClient client(espClient);    // Client MQTT
+
+// États des LED
+bool led1State = false;
+bool led2State = false;
+bool led3State = false;
+
+// Dernier état des boutons (éviter les rebonds)
+bool lastBtn1 = HIGH;
+bool lastBtn2 = HIGH;
+bool lastBtn3 = HIGH;
+
+// Connexion au réseau WiFi
+void setup_wifi() {
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(ssid, password);                 // Démarrer la connexion WiFi
+  while (WiFi.status() != WL_CONNECTED) {     // Attendre la connexion
+    delay(500); Serial.print(".");
+  }
+  Serial.println(" Connected!");
+}
+
+// Mise à jour de l’état d’une LED spécifique
+void updateLED(int id) {
+  bool state = false;
+  if (id == 1) state = led1State;
+  if (id == 2) state = led2State;
+  if (id == 3) state = led3State;
+
+  int pin = (id == 1) ? LED1 : (id == 2) ? LED2 : LED3;
+
+  // Si on utilise un relais, l’état logique est inversé
+  digitalWrite(pin, useRelay ? (state ? LOW : HIGH) : (state ? HIGH : LOW));
+}
+
+// Publier l’état d’une LED sur le serveur MQTT
+void publishState(int id, bool state) {
+  const char* topic = (id == 1) ? "esp32/led1" : (id == 2) ? "esp32/led2" : "esp32/led3";
+  client.publish(topic, state ? "ON" : "OFF");
+}
+
+// Changer l’état d’une LED et publier la nouvelle valeur
+void toggleLED(int id) {
+  if (id == 1) {
+    led1State = !led1State;
+    updateLED(1); publishState(1, led1State);
+  } else if (id == 2) {
+    led2State = !led2State;
+    updateLED(2); publishState(2, led2State);
+  } else if (id == 3) {
+    led3State = !led3State;
+    updateLED(3); publishState(3, led3State);
+  }
+}
+
+// Vérifie les boutons physiques et change l’état des LED si nécessaire
+void checkButtons() {
+  bool currBtn1 = digitalRead(BTN1);
+  bool currBtn2 = digitalRead(BTN2);
+  bool currBtn3 = digitalRead(BTN3);
+
+  if (currBtn1 == LOW && lastBtn1 == HIGH) { toggleLED(1); delay(200); } // Anti-rebond
+  if (currBtn2 == LOW && lastBtn2 == HIGH) { toggleLED(2); delay(200); }
+  if (currBtn3 == LOW && lastBtn3 == HIGH) { toggleLED(3); delay(200); }
+
+  lastBtn1 = currBtn1;
+  lastBtn2 = currBtn2;
+  lastBtn3 = currBtn3;
+}
+
+// Fonction appelée quand un message MQTT est reçu
+void callback(char* topic, byte* payload, unsigned int length) {
+  String msg = "";
+  for (int i = 0; i < length; i++) msg += (char)payload[i];
+  msg.trim();
+
+  // Mise à jour de l’état des LED selon le message reçu
+  if (String(topic) == "esp32/led1") {
+    led1State = (msg == "ON"); updateLED(1);
+  } else if (String(topic) == "esp32/led2") {
+    led2State = (msg == "ON"); updateLED(2);
+  } else if (String(topic) == "esp32/led3") {
+    led3State = (msg == "ON"); updateLED(3);
+  }
+}
+
+// Reconnexion au serveur MQTT si la connexion est perdue
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Connecting to MQTT...");
+    if (client.connect("esp32_client")) {
+      Serial.println(" connected!");
+      client.subscribe("esp32/led1");
+      client.subscribe("esp32/led2");
+      client.subscribe("esp32/led3");
+    } else {
+      Serial.print(" failed. Retry in 5 sec\n");
+      delay(5000);
+    }
+  }
+}
+
+// Configuration initiale
+void setup() {
+  Serial.begin(115200);
+  pinMode(LED1, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(LED3, OUTPUT);
+  pinMode(BTN1, INPUT_PULLUP); // Utilise la résistance interne
+  pinMode(BTN2, INPUT_PULLUP);
+  pinMode(BTN3, INPUT_PULLUP);
+
+  setup_wifi();                           // Connexion WiFi
+  client.setServer(mqtt_server, 1883);    // Configuration du serveur MQTT
+  client.setCallback(callback);           // Définir la fonction de rappel
+}
+
+// Boucle principale
+void loop() {
+  if (!client.connected()) reconnect();   // Reconnexion si nécessaire
+  client.loop();                          // Gérer la communication MQTT
+  checkButtons();                         // Vérifier les entrées des boutons
+}
